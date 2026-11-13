@@ -1,0 +1,185 @@
+# RAG POC – Question Answering Using Spring Boot
+
+## 1. Objective
+
+The objective of this POC is to build a simple question-answering application using RAG (Retrieval-Augmented Generation).
+
+Users can upload Excel and PDF files and ask questions in natural language. The application finds relevant information from the uploaded files and uses an AI model to generate answers.
+
+For Excel data, SQL is used for exact record lookups and numerical calculations. For descriptive questions, the application retrieves relevant information and uses an AI model to explain it.
+
+The application can also select the appropriate file automatically when multiple files are uploaded.
+
+## 2. What Is RAG?
+
+RAG stands for Retrieval-Augmented Generation.
+
+It combines two main steps:
+
+1. **Retrieval:** Find information relevant to the user's question.
+2. **Generation:** Use an AI model to create an answer based on the retrieved information.
+
+For example, a user can ask, "What are the six fundamental principles of finance?"
+
+The application retrieves the relevant content from the uploaded finance PDF and uses an AI model to generate the answer with page references.
+
+Similarly, a user can ask, "Compare products and sales patterns in the West region." The application retrieves relevant Excel records and generates a summary.
+
+## 3. Technologies Used
+
+| Technology | Purpose |
+|---|---|
+| Java 21 | Application development |
+| Spring Boot | REST APIs and application logic |
+| Spring AI | Integration with AI models |
+| Apache POI | Reading Excel files |
+| Apache PDFBox | Extracting text from PDF files |
+| Gemini Embeddings | Converting text into numerical vectors |
+| PostgreSQL | Storing data persistently |
+| pgvector | Storing embeddings and finding similar content |
+| Groq | Generating answers and helping select relevant documents |
+
+## 4. How We Built the POC
+
+### Step 1: Upload documents
+
+We created an API that accepts Excel and PDF files.
+
+- For Excel files, the application reads the columns and rows.
+- For PDF files, it extracts text from the pages and divides it into smaller chunks.
+
+### Step 2: Convert content into embeddings
+
+The application converts Excel rows and PDF text chunks into embeddings using the configured Gemini embedding model.
+
+An embedding is a numerical representation of text. It helps the application find information that is related to a question, even when the exact words are different.
+
+### Step 3: Store the data
+
+The application stores the extracted content, embeddings, and metadata in PostgreSQL using pgvector.
+
+This allows the application to reuse previously indexed data after a restart without requiring the files to be uploaded again.
+
+### Step 4: Select the appropriate file
+
+When a user asks a question, the application identifies which uploaded file is most relevant.
+
+For example:
+
+- Finance questions are matched with the finance PDF.
+- SAML integration questions are matched with the Alegeus SAML PDF.
+- Sales and revenue questions are matched with the Excel file.
+
+The user can also specify a filename when they want to use a particular dataset.
+
+### Step 5: Retrieve information
+
+The application chooses a processing method based on the question.
+
+- **Exact lookup:** Finds a particular record, such as an order ID.
+- **SQL calculation:** Calculates totals and other numerical results from Excel data.
+- **Semantic retrieval:** Finds relevant Excel rows or PDF text chunks for descriptive questions.
+
+### Step 6: Generate the answer
+
+For semantic questions, the application sends the retrieved content to Groq, which generates an answer based on that information.
+
+For PDF questions, the answer can include page references to help the user locate the source content.
+
+For exact Excel lookups and numerical calculations, SQL provides the result rather than asking the AI model to calculate it.
+
+### Step 7: Return the response
+
+The question API returns the answer along with information such as the source filename, processing mode, and document selection details.
+
+## 5. Architecture
+
+### Document upload and indexing
+
+Excel/PDF file → Spring Boot → Extract content → Generate embeddings → PostgreSQL + pgvector
+
+### Question answering
+
+User question → Spring Boot → Select the relevant file → Choose the processing method
+
+- **Exact record:** SQL lookup → Result
+- **Numerical question:** SQL calculation → Result
+- **Descriptive question:** Vector search → Relevant content → Groq → Answer
+- **PDF question:** Vector search → Relevant text chunks → Groq → Answer with page references
+
+The application then returns the response through the REST API.
+
+## 6. APIs Implemented
+
+### Upload API
+
+`POST /api/documents/upload`
+
+Uploads and indexes supported Excel and PDF files.
+
+### Question API
+
+`POST /api/documents/ask`
+
+Accepts a question and returns an answer based on the uploaded data.
+
+Example request:
+
+```json
+{
+  "question": "Which SAML attributes are mandatory for TPA, Employer, and Partner users?"
+}
+```
+
+The application can automatically select the Alegeus SAML PDF if it is available and relevant.
+
+The existing chat API, `POST /api/chat`, is used for general chat and remains separate from document-based question answering.
+
+## 7. POC Validation
+
+We tested the application using an Excel file and PDF documents.
+
+| Test | Result |
+|---|---|
+| Excel parsing and indexing | 36 rows indexed from the sales dataset |
+| Exact order lookup | Retrieved details for ORD-00004 |
+| SQL calculation | West net revenue: ₹1,281,280 |
+| SQL calculation with negative values | West net profit: ₹240,967 |
+| Excel semantic retrieval | Retrieved West-region records for sales comparisons |
+| PDF upload and indexing | Successfully indexed a 21-page finance PDF |
+| PDF question answering | Answered a question about the six fundamental principles of finance and referenced page 14 |
+| SAML PDF question answering | Answered a question about SAML SSO using the Alegeus integration guide |
+| Automatic file selection | Selected the relevant Excel or PDF file for tested questions |
+| Persistent storage | Previously indexed data remained available after an application restart |
+
+## 8. What This POC Demonstrates
+
+The POC demonstrates that:
+
+- Users can upload Excel and PDF files.
+- Document content can be converted into embeddings and stored in a vector database.
+- Users can ask questions in natural language.
+- The application can retrieve relevant information using vector similarity search.
+- An AI model can generate answers based on retrieved content.
+- SQL can handle exact Excel lookups and numerical calculations.
+- The application can automatically select a relevant document from multiple uploaded files.
+- Data can remain available after an application restart.
+
+## 9. Current Limitations
+
+This is an initial POC, so some improvements are still needed.
+
+- Automatic file selection can sometimes choose more than one file when only one is needed.
+- Large prompts may exceed the AI model's token limits.
+- Some answers may include more source pages than necessary.
+- Semantic answers may contain inaccurate interpretations, so important answers should be checked against the original document.
+- The solution has not been tested with every possible file, dataset, or question type.
+- Production-level security, monitoring, performance, and scalability require further work.
+
+## 10. Conclusion
+
+This POC demonstrates how Spring Boot can combine RAG, vector search, SQL, and AI-generated answers in one application.
+
+It supports Excel and PDF documents, retrieves relevant information, and generates answers to natural-language questions. SQL handles exact lookups and calculations, while vector search helps answer descriptive questions.
+
+PostgreSQL and pgvector provide persistent storage for the indexed content and embeddings. The POC provides a foundation for exploring document-based question answering before extending it to additional data sources and business use cases.
