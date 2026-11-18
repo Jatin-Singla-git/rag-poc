@@ -165,18 +165,55 @@ The POC demonstrates that:
 - The application can automatically select a relevant document from multiple uploaded files.
 - Data can remain available after an application restart.
 
-## 9. Current Limitations
+## 9. Guardrails
+
+The following protections are implemented. They reduce risk but do not remove it completely.
+
+### Unsupported PDF answers
+
+For a PDF question, the model returns its answer together with whether the retrieved excerpts support it and which excerpt numbers it used.
+
+- If no excerpts are retrieved, the model says the excerpts do not support an answer, or it lists no valid supporting excerpt, the API returns `mode: "no_source"`, `sourceFilename: null` and no `sourcePages`.
+- Otherwise `sourcePages` contains only the pages of the excerpts the model listed. Invalid excerpt numbers are ignored.
+- If the structured model reply fails technically (error or unusable reply), the application falls back to a plain answer and lists all retrieved pages. That answer cannot be checked against the excerpts.
+- When several files are selected, a file with no supporting content is left out of the combined answer. If none have support, the result is `no_source`.
+
+### Question length and validation
+
+- `POST /api/documents/ask` and `POST /api/chat` return HTTP 400 if the question is missing, blank, or longer than 2,000 characters (after trimming).
+- Both endpoints use the same validation and messages.
+
+### Untrusted document content
+
+- Text taken from uploaded files is treated as data, not instructions. The prompts tell the model so, and the text is placed in `<context>`, `<candidates>` or `<sample_row>` blocks.
+- Before any document text (excerpts, rows, filenames, column headers, calculation labels) is inserted into a prompt, any `<context>`, `<candidates>` or `<sample_row>` tag in it, opening or closing, is defused (`<` becomes `&lt;`). This stops document text from closing those blocks. The rest of the text is unchanged.
+
+### Document selection when the selector fails
+
+- If the model-based document selector fails, a document is chosen only when a cell value exactly matches an identifier in the question (for example an order ID) or the question contains the file's name.
+- Otherwise the normal `no_source` result is returned. A document is never chosen from the similarity score alone.
+
+### Remaining limitations
+
+- Grounding relies on prompt instructions. The code does not check the answer text against the retrieved content, so an unsupported or inaccurate answer is still possible.
+- The model decides what counts as supporting. It can list a wrong excerpt, omit a useful one, or declare a valid answer unsupported, which then returns `no_source`.
+- Neutralizing delimiter tags does not stop plain-text instructions inside a document. It relies on the model following the "untrusted data" rules. The column list in the Excel planner prompt is not inside a delimiter block.
+- Normal document selection depends on the model's judgment, so a wrong or missed file is possible.
+- `/api/chat` is a general chat endpoint with no document grounding; it only validates the question.
+- The upload size limit is 20 MB and the PDF limits are 300 pages and 1,000 chunks. No other upload checks, request timeouts, authentication or rate limits are configured.
+
+## 10. Current Limitations
 
 This is an initial POC, so some improvements are still needed.
 
 - Automatic file selection can sometimes choose more than one file when only one is needed.
 - Large prompts may exceed the AI model's token limits.
-- Some answers may include more source pages than necessary.
+- Source pages for PDF answers depend on the model's judgment of which excerpts support the answer, so they may occasionally include a page that is not needed or miss a useful one.
 - Semantic answers may contain inaccurate interpretations, so important answers should be checked against the original document.
 - The solution has not been tested with every possible file, dataset, or question type.
 - Production-level security, monitoring, performance, and scalability require further work.
 
-## 10. Conclusion
+## 11. Conclusion
 
 This POC demonstrates how Spring Boot can combine RAG, vector search, SQL, and AI-generated answers in one application.
 

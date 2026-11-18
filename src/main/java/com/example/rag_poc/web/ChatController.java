@@ -17,7 +17,7 @@ public class ChatController {
 
     @PostMapping("/chat")
     public Map<String, String> chat(@RequestBody Map<String, String> request) {
-        String question = request.get("question");
+        String question = QuestionValidator.validate(request == null ? null : request.get("question"));
 
         String answer = chatClient.prompt()
                 .user(question)

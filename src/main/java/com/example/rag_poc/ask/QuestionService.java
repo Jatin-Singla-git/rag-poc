@@ -78,8 +78,11 @@ public class QuestionService {
             - Keep the answer short and clear, and mention the column names you used.
             """;
 
-    /** Structured PDF reply: the answer plus the numbers of the excerpts that support it. */
-    public record PdfAnswer(String answer, List<Integer> supportingExcerpts) {
+    /**
+     * Structured PDF reply: whether the excerpts support an answer, the answer, and the numbers of
+     * the excerpts that support it.
+     */
+    public record PdfAnswer(Boolean supported, String answer, List<Integer> supportingExcerpts) {
     }
 
     private static final String PDF_PROMPT_RULES = """
@@ -95,13 +98,15 @@ public class QuestionService {
 
     private static final String PDF_SYSTEM_PROMPT = """
             You answer questions about a PDF document using ONLY the excerpts provided in the user message.
-            Reply with the plan only: answer and supportingExcerpts.
+            Reply with the plan only: supported, answer and supportingExcerpts.
+            - supported: false if the excerpts do not contain the information needed to answer the
+              question (then answer may briefly say so and supportingExcerpts must be empty); otherwise true.
             - answer: the answer text.
             - supportingExcerpts: the numbers of ALL excerpts that contain information you used or that
               directly support or document any part of the answer, including partial support and every
               excerpt needed for a comparison or a multi-part answer. Do not list excerpts that are only
-              loosely related, such as agendas, tables of contents or other topics. Use an empty list if no
-              excerpt supports an answer.
+              loosely related, such as agendas, tables of contents or other topics. Use an empty list only
+              when supported is false.
             Rules:
             """ + PDF_PROMPT_RULES;
 
@@ -165,8 +170,16 @@ public class QuestionService {
         List<String> names = new ArrayList<>();
         List<String> pages = new ArrayList<>();
         String mode = null;
+        ExcelAnswer unsupported = null;
         for (DatasetInfo dataset : selection.datasets()) {
             ExcelAnswer part = answerFromDataset(question, dataset);
+            if ("no_source".equals(part.mode())) {
+                // This file has nothing supporting an answer: leave it out of the combined answer.
+                if (unsupported == null) {
+                    unsupported = part;
+                }
+                continue;
+            }
             names.add(dataset.filename());
             if (mode == null) {
                 mode = part.mode();
@@ -178,6 +191,9 @@ public class QuestionService {
                 combined.append("\n\n");
             }
             combined.append("From ").append(dataset.filename()).append(":\n").append(part.answer());
+        }
+        if (names.isEmpty() && unsupported != null) {
+            return unsupported.withSelection("automatic", selection.reason());
         }
         return new ExcelAnswer(combined.toString(), String.join(", ", names), mode,
                 pages.isEmpty() ? null : String.join("; ", pages), "automatic", selection.reason());
@@ -260,8 +276,7 @@ public class QuestionService {
             List<Document> chunks = vectorStoreService.searchChunks(dataset.datasetId(), question);
             log.info("Path: PDF chunk retrieval ({} chunks)", chunks.size());
             if (chunks.isEmpty()) {
-                return new ExcelAnswer("I could not find any relevant content in " + dataset.filename()
-                        + " for this question.", dataset.filename(), "retrieval");
+                return noPdfSupport(dataset);
             }
 
             // Keep document order so the context reads naturally.
@@ -278,15 +293,18 @@ public class QuestionService {
             }
 
             // One call returns the answer AND which supplied excerpts support it, so sourcePages lists
-            // only supporting pages (no extra API call). Falls back to all supplied pages if the
-            // structured reply is unusable.
+            // only supporting pages (no extra API call).
+            //  - model says unsupported, or lists no valid supporting excerpt => no_source, no pages
+            //  - structured call failed technically (error / unusable reply)  => plain answer, all
+            //    supplied pages (cannot be verified; see README limitations)
             String answer;
             TreeSet<Integer> pages = new TreeSet<>();
             PdfAnswer structured = null;
             try {
                 structured = chatClient.prompt()
                         .system(PDF_SYSTEM_PROMPT)
-                        .user("Question: " + question + "\n\n<context>\n" + context + "</context>")
+                        .user("Question: " + question + "\n\n<context>\n"
+                                + PromptSafety.untrusted(context.toString()) + "</context>")
                         .call()
                         .entity(PdfAnswer.class);
             } catch (Exception exception) {
@@ -294,6 +312,10 @@ public class QuestionService {
                         exception.toString());
             }
             if (structured != null && structured.answer() != null && !structured.answer().isBlank()) {
+                if (Boolean.FALSE.equals(structured.supported())) {
+                    log.info("PDF answer: model reported the excerpts do not support an answer");
+                    return noPdfSupport(dataset);
+                }
                 answer = structured.answer();
                 if (structured.supportingExcerpts() != null) {
                     for (Integer number : structured.supportingExcerpts()) {
@@ -302,10 +324,12 @@ public class QuestionService {
                         }
                     }
                 }
+                if (pages.isEmpty()) {
+                    log.info("PDF answer: no valid supporting excerpt listed, treating as unsupported");
+                    return noPdfSupport(dataset);
+                }
             } else {
                 answer = generate(PDF_SYSTEM_PROMPT_PLAIN, question, context.toString());
-            }
-            if (pages.isEmpty()) {
                 ordered.forEach(chunk -> pages.add(pageOf(chunk)));
             }
             log.info("PDF answer: {} excerpts supplied, supporting pages {}", ordered.size(), pages);
@@ -322,6 +346,12 @@ public class QuestionService {
         }
     }
 
+    /** The PDF has no content supporting an answer: no source filename and no pages are reported. */
+    private ExcelAnswer noPdfSupport(DatasetInfo dataset) {
+        return new ExcelAnswer("No content supporting an answer to this question was found in "
+                + dataset.filename() + ".", null, "no_source");
+    }
+
     private int pageOf(Document document) {
         Object page = document.getMetadata().get("page");
         return page instanceof Number number ? number.intValue() : 0;
@@ -335,7 +365,8 @@ public class QuestionService {
     }
 
     private String generate(String systemPrompt, String question, String context) {
-        String user = "Question: " + question + "\n\n<context>\n" + context + "</context>";
+        String user = "Question: " + question + "\n\n<context>\n"
+                + PromptSafety.untrusted(context) + "</context>";
         String answer = chatClient.prompt()
                 .system(systemPrompt)
                 .user(user)

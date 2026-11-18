@@ -2,11 +2,9 @@ package com.example.rag_poc.web;
 
 import com.example.rag_poc.ask.QuestionService;
 import com.example.rag_poc.ingest.IngestionService;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
-import org.springframework.web.server.ResponseStatusException;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -34,19 +32,14 @@ public class DocumentController {
 
     @PostMapping("/ask")
     public Map<String, String> askAboutExcel(@RequestBody Map<String, String> request) {
-        String question = request == null ? null : request.get("question");
-
-        if (question == null || question.isBlank()) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST, "The question must not be blank.");
-        }
+        String question = QuestionValidator.validate(request == null ? null : request.get("question"));
 
         // Optional "filename" targets a specific upload; if omitted the relevant file(s) are selected automatically.
         QuestionService.ExcelAnswer result =
-                questionService.ask(question.trim(), request.get("filename"));
+                questionService.ask(question, request.get("filename"));
 
         Map<String, String> response = new LinkedHashMap<>();
-        response.put("question", question.trim());
+        response.put("question", question);
         response.put("answer", result.answer());
         response.put("sourceFilename", result.filename());
         if (result.selection() != null) {

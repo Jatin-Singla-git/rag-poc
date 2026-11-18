@@ -7,7 +7,6 @@ import com.example.rag_poc.store.DatasetSummary;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -63,14 +62,11 @@ public class DatasetSelectionService {
 
     private final ChatClient chatClient;
     private final DatasetStoreService vectorStoreService;
-    private final double similarityThreshold;
 
     public DatasetSelectionService(ChatClient.Builder chatClientBuilder,
-                                   DatasetStoreService vectorStoreService,
-                                   @Value("${app.rag.similarity-threshold:0.2}") double similarityThreshold) {
+                                   DatasetStoreService vectorStoreService) {
         this.chatClient = chatClientBuilder.build();
         this.vectorStoreService = vectorStoreService;
-        this.similarityThreshold = similarityThreshold;
     }
 
     public Selection select(String question) {
@@ -152,7 +148,8 @@ public class DatasetSelectionService {
         try {
             plan = chatClient.prompt()
                     .system(SELECTOR_SYSTEM_PROMPT)
-                    .user("Question: " + question + "\n\n<candidates>\n" + profiles + "</candidates>")
+                    .user("Question: " + question + "\n\n<candidates>\n"
+                            + PromptSafety.untrusted(profiles.toString()) + "</candidates>")
                     .call()
                     .entity(SelectionPlan.class);
         } catch (Exception exception) {
@@ -161,7 +158,7 @@ public class DatasetSelectionService {
         log.info("Dataset candidates {} -> selector result: {}", candidates, plan);
 
         if (plan == null) {
-            return fallback(candidates, infos, identifierMatches, bestScore);
+            return fallback(question, candidates, infos, identifierMatches);
         }
 
         List<DatasetInfo> chosen = new ArrayList<>();
@@ -187,22 +184,29 @@ public class DatasetSelectionService {
         return new Selection(Status.SELECTED, chosen, null, plan.reason());
     }
 
-    /** Used only if the LLM call fails: exact identifier match first, else best similarity above threshold. */
-    private Selection fallback(List<String> candidates,
-                               Map<String, DatasetInfo> infos,
-                               Set<String> identifierMatches, Map<String, Double> bestScore) {
+    /**
+     * Used only if the LLM call fails. Only explicit evidence is accepted: an exact identifier match
+     * (e.g. an order ID found in a file) or the file's own name appearing in the question.
+     * Similarity scores alone are never enough; otherwise the normal no-source result is returned.
+     */
+    private Selection fallback(String question, List<String> candidates,
+                               Map<String, DatasetInfo> infos, Set<String> identifierMatches) {
         for (String id : candidates) {
             if (identifierMatches.contains(id)) {
                 return new Selection(Status.SELECTED, List.of(infos.get(id)), null,
                         "Selected by exact identifier match (fallback).");
             }
         }
-        return candidates.stream()
-                .filter(id -> bestScore.getOrDefault(id, -1.0) >= similarityThreshold)
-                .max(Comparator.comparingDouble(id -> bestScore.get(id)))
-                .map(id -> new Selection(Status.SELECTED, List.of(infos.get(id)), null,
-                        "Selected by highest vector similarity (fallback)."))
-                .orElseGet(() -> none("No uploaded document appears relevant to this question."));
+        String lowerQuestion = question.toLowerCase(Locale.ROOT);
+        for (String id : candidates) {
+            String filename = infos.get(id).filename();
+            if (filename != null && !filename.isBlank()
+                    && lowerQuestion.contains(filename.toLowerCase(Locale.ROOT))) {
+                return new Selection(Status.SELECTED, List.of(infos.get(id)), null,
+                        "Selected because the question names the file (fallback).");
+            }
+        }
+        return none("The document selector was unavailable and no explicit identifier or filename matched.");
     }
 
     private Selection none(String reason) {

@@ -85,8 +85,9 @@ public class ExcelAnalytics {
         StringBuilder sample = new StringBuilder();
         dataset.sampleRow().forEach((k, v) -> sample.append(k).append(" = ").append(v).append("\n"));
 
-        String user = "Question: " + question + "\n\nColumns: " + String.join(" | ", dataset.columns())
-                + "\n\n<sample_row>\n" + sample + "</sample_row>";
+        String user = "Question: " + question + "\n\nColumns: "
+                + PromptSafety.untrusted(String.join(" | ", dataset.columns()))
+                + "\n\n<sample_row>\n" + PromptSafety.untrusted(sample.toString()) + "</sample_row>";
         try {
             return chatClient.prompt()
                     .system(PLANNER_SYSTEM_PROMPT)
