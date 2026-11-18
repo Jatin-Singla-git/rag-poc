@@ -1,4 +1,4 @@
-package com.example.rag_poc;
+package com.example.rag_poc.web;
 
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.web.bind.annotation.*;

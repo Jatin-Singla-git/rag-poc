@@ -1,4 +1,4 @@
-package com.example.rag_poc;
+package com.example.rag_poc.ingest;
 
 import org.apache.poi.ss.usermodel.*;
 import org.springframework.http.HttpStatus;
@@ -11,7 +11,7 @@ import java.util.*;
 
 /**
  * Parses an uploaded .xlsx file into an {@link ExcelData}.
- * Storage is handled by {@link ExcelVectorStoreService} (PostgreSQL/pgvector).
+ * Storage is handled by {@code DatasetStoreService} (PostgreSQL/pgvector).
  */
 @Service
 public class ExcelDataService {

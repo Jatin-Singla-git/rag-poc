@@ -1,8 +1,8 @@
-package com.example.rag_poc;
+package com.example.rag_poc.ingest;
 
+import com.example.rag_poc.store.DatasetStoreService;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -11,45 +11,42 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-@RestController
-@RequestMapping("/api/documents")
-public class ExcelUploadController {
+/**
+ * Orchestrates an upload: picks the Excel or PDF path by file extension, parses the file,
+ * stores it through {@link DatasetStoreService} and builds the upload response.
+ */
+@Service
+public class IngestionService {
 
     private final ExcelDataService excelDataService;
-    private final ExcelVectorStoreService vectorStoreService;
     private final PdfDocumentService pdfDocumentService;
-    private final ExcelQuestionService excelQuestionService;
+    private final DatasetStoreService vectorStoreService;
 
-    public ExcelUploadController(ExcelDataService excelDataService,
-                                 ExcelVectorStoreService vectorStoreService,
-                                 PdfDocumentService pdfDocumentService,
-                                 ExcelQuestionService excelQuestionService) {
+    public IngestionService(ExcelDataService excelDataService,
+                            PdfDocumentService pdfDocumentService,
+                            DatasetStoreService vectorStoreService) {
         this.excelDataService = excelDataService;
-        this.vectorStoreService = vectorStoreService;
         this.pdfDocumentService = pdfDocumentService;
-        this.excelQuestionService = excelQuestionService;
+        this.vectorStoreService = vectorStoreService;
     }
 
-    @PostMapping(
-            value = "/upload",
-            consumes = MediaType.MULTIPART_FORM_DATA_VALUE
-    )
-    public Map<String, Object> uploadExcel(
-            @RequestParam("file") MultipartFile file) {
-
+    public Map<String, Object> ingest(MultipartFile file) {
         if (file.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Please upload a file.");
         }
         String name = file.getOriginalFilename() == null
                 ? "" : file.getOriginalFilename().toLowerCase(Locale.ROOT);
         if (name.endsWith(".pdf")) {
-            return uploadPdf(file);
+            return ingestPdf(file);
         }
         if (!name.endsWith(".xlsx")) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Unsupported file type. Please upload an .xlsx (Excel) or .pdf file.");
         }
+        return ingestExcel(file);
+    }
 
+    private Map<String, Object> ingestExcel(MultipartFile file) {
         ExcelData data = excelDataService.parse(file);
         String datasetId = vectorStoreService.ingest(data);
 
@@ -73,7 +70,7 @@ public class ExcelUploadController {
         return response;
     }
 
-    private Map<String, Object> uploadPdf(MultipartFile file) {
+    private Map<String, Object> ingestPdf(MultipartFile file) {
         PdfDocumentService.PdfData data = pdfDocumentService.parse(file);
         String datasetId = vectorStoreService.ingestPdf(data);
 
@@ -91,36 +88,6 @@ public class ExcelUploadController {
                         + "Ask questions via POST /api/documents/ask; the relevant file is chosen "
                         + "automatically unless you pass \"filename\"."
         );
-        return response;
-    }
-
-    @PostMapping("/ask")
-    public Map<String, String> askAboutExcel(@RequestBody Map<String, String> request) {
-        String question = request == null ? null : request.get("question");
-
-        if (question == null || question.isBlank()) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST, "The question must not be blank.");
-        }
-
-        // Optional "filename" targets a specific upload; if omitted the relevant file(s) are selected automatically.
-        ExcelQuestionService.ExcelAnswer result =
-                excelQuestionService.ask(question.trim(), request.get("filename"));
-
-        Map<String, String> response = new LinkedHashMap<>();
-        response.put("question", question.trim());
-        response.put("answer", result.answer());
-        response.put("sourceFilename", result.filename());
-        if (result.selection() != null) {
-            response.put("selection", result.selection());
-            if (result.selectionReason() != null) {
-                response.put("selectionReason", result.selectionReason());
-            }
-        }
-        response.put("mode", result.mode());
-        if (result.sourcePages() != null) {
-            response.put("sourcePages", result.sourcePages());
-        }
         return response;
     }
 }

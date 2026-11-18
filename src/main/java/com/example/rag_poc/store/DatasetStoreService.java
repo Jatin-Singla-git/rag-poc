@@ -1,5 +1,7 @@
-package com.example.rag_poc;
+package com.example.rag_poc.store;
 
+import com.example.rag_poc.ingest.ExcelData;
+import com.example.rag_poc.ingest.PdfDocumentService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.document.Document;
@@ -32,14 +34,9 @@ import java.util.*;
  * Questions use the most recently uploaded dataset unless a filename is given.
  */
 @Service
-public class ExcelVectorStoreService {
+public class DatasetStoreService {
 
-    private static final Logger log = LoggerFactory.getLogger(ExcelVectorStoreService.class);
-
-    /** Info about one stored dataset. */
-    public record DatasetInfo(String datasetId, String filename, String sheetName,
-                              List<String> columns, Map<String, String> sampleRow, String type) {
-    }
+    private static final Logger log = LoggerFactory.getLogger(DatasetStoreService.class);
 
     private static final String JSON = "metadata::jsonb";
     // Parses a cell to a number in three steps:
@@ -59,7 +56,7 @@ public class ExcelVectorStoreService {
     private final int topK;
     private final double similarityThreshold;
 
-    public ExcelVectorStoreService(
+    public DatasetStoreService(
             VectorStore vectorStore,
             JdbcTemplate jdbcTemplate,
             @Value("${spring.ai.vectorstore.pgvector.table-name:vector_store}") String table,
@@ -221,14 +218,6 @@ public class ExcelVectorStoreService {
 
     // ------------------------------------------------------------------ lookup
 
-    /** Summary of one stored dataset (cheap to compute; no content). */
-    public record DatasetSummary(String datasetId, String filename, String type, int parts, long uploadedAt) {
-    }
-
-    /** One vector-search hit from a search across all datasets. */
-    public record DatasetHit(String datasetId, double score, String text) {
-    }
-
     /** Lists every stored dataset (Excel and PDF), most recently uploaded first. */
     public List<DatasetSummary> listDatasets() {
         return jdbcTemplate.query(
@@ -349,10 +338,6 @@ public class ExcelVectorStoreService {
     }
 
     // ------------------------------------------------------ value-scoped lookup
-
-    /** Rows whose categorical cells match words in the question. */
-    public record ScopedRows(List<String> rows, int totalMatches, String scope) {
-    }
 
     /** A column only counts as categorical if it has at most this many distinct values. */
     private static final int MAX_CATEGORY_VALUES = 20;

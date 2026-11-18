@@ -1,5 +1,9 @@
-package com.example.rag_poc;
+package com.example.rag_poc.ask;
 
+import com.example.rag_poc.store.DatasetHit;
+import com.example.rag_poc.store.DatasetInfo;
+import com.example.rag_poc.store.DatasetStoreService;
+import com.example.rag_poc.store.DatasetSummary;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -34,7 +38,7 @@ public class DatasetSelectionService {
     public enum Status { SELECTED, NONE, CLARIFY }
 
     /** Result of a selection. datasets holds the chosen (or, for CLARIFY, the competing) datasets. */
-    public record Selection(Status status, List<ExcelVectorStoreService.DatasetInfo> datasets,
+    public record Selection(Status status, List<DatasetInfo> datasets,
                             String message, String reason) {
     }
 
@@ -58,11 +62,11 @@ public class DatasetSelectionService {
             """;
 
     private final ChatClient chatClient;
-    private final ExcelVectorStoreService vectorStoreService;
+    private final DatasetStoreService vectorStoreService;
     private final double similarityThreshold;
 
     public DatasetSelectionService(ChatClient.Builder chatClientBuilder,
-                                   ExcelVectorStoreService vectorStoreService,
+                                   DatasetStoreService vectorStoreService,
                                    @Value("${app.rag.similarity-threshold:0.2}") double similarityThreshold) {
         this.chatClient = chatClientBuilder.build();
         this.vectorStoreService = vectorStoreService;
@@ -70,7 +74,7 @@ public class DatasetSelectionService {
     }
 
     public Selection select(String question) {
-        List<ExcelVectorStoreService.DatasetSummary> all = vectorStoreService.listDatasets();
+        List<DatasetSummary> all = vectorStoreService.listDatasets();
         if (all.isEmpty()) {
             throw new org.springframework.web.server.ResponseStatusException(
                     org.springframework.http.HttpStatus.CONFLICT,
@@ -81,7 +85,7 @@ public class DatasetSelectionService {
         Map<String, Double> bestScore = new HashMap<>();
         Map<String, String> bestText = new HashMap<>();
         try {
-            for (ExcelVectorStoreService.DatasetHit hit : vectorStoreService.searchAllDatasets(question, VECTOR_PROBE)) {
+            for (DatasetHit hit : vectorStoreService.searchAllDatasets(question, VECTOR_PROBE)) {
                 if (hit.score() > bestScore.getOrDefault(hit.datasetId(), -1.0)) {
                     bestScore.put(hit.datasetId(), hit.score());
                     bestText.put(hit.datasetId(), hit.text());
@@ -113,14 +117,14 @@ public class DatasetSelectionService {
         }
 
         // --- profiles of the candidates
-        Map<String, ExcelVectorStoreService.DatasetInfo> infos = new LinkedHashMap<>();
-        Map<String, ExcelVectorStoreService.DatasetSummary> summaries = new HashMap<>();
+        Map<String, DatasetInfo> infos = new LinkedHashMap<>();
+        Map<String, DatasetSummary> summaries = new HashMap<>();
         all.forEach(d -> summaries.put(d.datasetId(), d));
         StringBuilder profiles = new StringBuilder();
         for (String id : candidates) {
-            ExcelVectorStoreService.DatasetInfo info = vectorStoreService.loadDataset(id);
+            DatasetInfo info = vectorStoreService.loadDataset(id);
             infos.put(id, info);
-            ExcelVectorStoreService.DatasetSummary summary = summaries.get(id);
+            DatasetSummary summary = summaries.get(id);
             profiles.append("- datasetId: ").append(id).append("\n")
                     .append("  filename: ").append(info.filename()).append("\n")
                     .append("  type: ").append(info.type()).append("\n")
@@ -160,7 +164,7 @@ public class DatasetSelectionService {
             return fallback(candidates, infos, identifierMatches, bestScore);
         }
 
-        List<ExcelVectorStoreService.DatasetInfo> chosen = new ArrayList<>();
+        List<DatasetInfo> chosen = new ArrayList<>();
         if (plan.selectedDatasetIds() != null) {
             for (String id : plan.selectedDatasetIds()) {
                 // Only ids from the candidate list are accepted; invented ids are dropped.
@@ -185,7 +189,7 @@ public class DatasetSelectionService {
 
     /** Used only if the LLM call fails: exact identifier match first, else best similarity above threshold. */
     private Selection fallback(List<String> candidates,
-                               Map<String, ExcelVectorStoreService.DatasetInfo> infos,
+                               Map<String, DatasetInfo> infos,
                                Set<String> identifierMatches, Map<String, Double> bestScore) {
         for (String id : candidates) {
             if (identifierMatches.contains(id)) {

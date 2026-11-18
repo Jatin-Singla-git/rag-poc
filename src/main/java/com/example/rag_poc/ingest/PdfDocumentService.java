@@ -1,4 +1,4 @@
-package com.example.rag_poc;
+package com.example.rag_poc.ingest;
 
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;

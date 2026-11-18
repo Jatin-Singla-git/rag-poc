@@ -1,4 +1,4 @@
-package com.example.rag_poc;
+package com.example.rag_poc.ingest;
 
 import java.util.List;
 import java.util.Map;
