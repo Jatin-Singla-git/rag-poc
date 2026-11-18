@@ -55,18 +55,21 @@ public class DatasetStoreService {
     private final String table;
     private final int topK;
     private final double similarityThreshold;
+    private final double pdfRelativeMargin;
 
     public DatasetStoreService(
             VectorStore vectorStore,
             JdbcTemplate jdbcTemplate,
             @Value("${spring.ai.vectorstore.pgvector.table-name:vector_store}") String table,
             @Value("${app.rag.top-k:8}") int topK,
-            @Value("${app.rag.similarity-threshold:0.2}") double similarityThreshold) {
+            @Value("${app.rag.similarity-threshold:0.2}") double similarityThreshold,
+            @Value("${app.rag.pdf-relative-margin:0.10}") double pdfRelativeMargin) {
         this.vectorStore = vectorStore;
         this.jdbcTemplate = jdbcTemplate;
         this.table = table;
         this.topK = topK;
         this.similarityThreshold = similarityThreshold;
+        this.pdfRelativeMargin = pdfRelativeMargin;
     }
 
     // ------------------------------------------------------------------ ingest
@@ -205,15 +208,45 @@ public class DatasetStoreService {
         return datasetId;
     }
 
-    /** Vector similarity search restricted to one dataset; returns whole documents (text + page). */
+    /** Always keep at least this many of the best chunks, however far their scores are from the top. */
+    private static final int PDF_MIN_CHUNKS = 3;
+
+    /**
+     * Vector similarity search restricted to one dataset; returns whole documents (text + page).
+     * The absolute threshold only removes clearly unrelated chunks; within a single PDF almost every
+     * page scores above it, so chunks that score far below the best match (more than
+     * app.rag.pdf-relative-margin) are dropped too. The best PDF_MIN_CHUNKS are always kept, and
+     * every chunk close to the top is kept, so answers spanning several pages keep all their pages.
+     */
     public List<Document> searchChunks(String datasetId, String question) {
-        return vectorStore.similaritySearch(
+        List<Document> results = vectorStore.similaritySearch(
                 SearchRequest.builder()
                         .query(question)
                         .topK(topK)
                         .similarityThreshold(similarityThreshold)
                         .filterExpression(new FilterExpressionBuilder().eq("datasetId", datasetId).build())
                         .build());
+        if (results.size() <= PDF_MIN_CHUNKS) {
+            return results;
+        }
+
+        List<Document> ranked = results.stream()
+                .sorted(Comparator.comparingDouble((Document d) -> d.getScore() == null ? 0.0 : d.getScore())
+                        .reversed())
+                .toList();
+        double cutoff = (ranked.get(0).getScore() == null ? 0.0 : ranked.get(0).getScore()) - pdfRelativeMargin;
+        List<Document> kept = new ArrayList<>();
+        for (int i = 0; i < ranked.size(); i++) {
+            double score = ranked.get(i).getScore() == null ? 0.0 : ranked.get(i).getScore();
+            if (i < PDF_MIN_CHUNKS || score >= cutoff) {
+                kept.add(ranked.get(i));
+            }
+        }
+        log.info("PDF retrieval for '{}': {} chunks above threshold, {} kept (cutoff {}); kept pages/scores: {}",
+                datasetId, results.size(), kept.size(), String.format(Locale.ROOT, "%.3f", cutoff),
+                kept.stream().map(d -> d.getMetadata().get("page") + "="
+                        + String.format(Locale.ROOT, "%.3f", d.getScore() == null ? 0.0 : d.getScore())).toList());
+        return kept;
     }
 
     // ------------------------------------------------------------------ lookup
