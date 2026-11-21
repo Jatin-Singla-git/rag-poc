@@ -133,6 +133,39 @@ Example request:
 
 The application can automatically select the Alegeus SAML PDF if it is available and relevant.
 
+### Observability (logs and metrics)
+
+**Tracing one request.** Every `/api/documents/ask` and upload request gets a short `requestId`. It is added to the logging MDC and, through `logging.pattern.correlation` in `application.properties`, appears in brackets on every console log line of that request. Filter the console or log file by the id to see the whole flow. The first and last lines also print `requestId=...`.
+
+A typical question logs, in order:
+
+```
+Ask started: requestId=1a2b3c4d questionLength=57 conversation=true selection=automatic
+Step rewrite: historyMessages=2 durationMs=412
+Step selection_vector_probe: limit=30 hits=30 datasets=3 durationMs=180
+Selection candidates: available=4 candidates=4 identifierMatches=0
+Step selection_llm: candidates=4 durationMs=530
+Step selection: method=automatic durationMs=720
+Dataset selection: method=automatic status=SELECTED datasets=[untitled.pdf(pdf)]
+PDF retrieval for 'untitled.pdf': 15 chunks above threshold, 6 kept (cutoff 0.571); kept pages/scores: [...]
+Step retrieval: dataset=untitled.pdf type=pdf operation=pdf_vector_search retained=6 durationMs=210
+Step answer_generation: structured=true excerpts=6 contextChars=4210 durationMs=980
+Ask finished: requestId=1a2b3c4d outcome=answered mode=retrieval durationMs=2420
+```
+
+- `outcome` is `answered`, `no_source`, `clarification` or `error`. Errors log the exception class (and the HTTP status for `ResponseStatusException`) and the duration, not the message.
+- Excel questions also log `excel_planner` and `excel_sql` steps, and retrieval steps for exact lookup, categorical values or vector search. Multi-PDF questions log one retrieval step per selected document.
+- Retrieval timings include the question embedding, because the embedding call happens inside the vector search. The store's existing log line shows chunks above the threshold, chunks kept after the relative filter, and page scores.
+- Uploads log `Upload started`, `ingest_parse` and `ingest_index` steps (indexing includes embedding) and `Upload finished` with `outcome=created|updated|unchanged` and the number of rows or chunks.
+- Logged: ids, counts, lengths and durations. Not logged: question text, document text, conversation history, API keys or content hashes.
+
+**Metrics.** Actuator and Micrometer are already dependencies. With `management.endpoints.web.exposure.include=health,metrics`:
+
+- `GET /actuator/metrics/rag.request.duration` returns the count, total time and max for all requests. Divide `TOTAL_TIME` by `COUNT` for the average. Filter with `?tag=kind:ask&tag=outcome:no_source` (kinds: `ask`, `upload`; ask outcomes: `answered`, `no_source`, `clarification`, `error`).
+- `GET /actuator/metrics/rag.step.duration?tag=step:selection_llm` shows timings per step (`rewrite`, `selection`, `selection_vector_probe`, `selection_llm`, `retrieval`, `excel_planner`, `excel_sql`, `answer_generation`, `ingest_parse`, `ingest_index`); tag `success:false` shows failures.
+- Spring AI's own model call metrics (for example `gen_ai.client.operation`) appear in the same endpoint if the library publishes them; token usage is available only from there, and nothing is estimated by the application.
+- Metrics are in memory and reset on restart. There is no Prometheus or Grafana.
+
 ### Re-uploading files (incremental indexing)
 
 A file is identified by its filename: the dataset id is the lowercased filename with unsafe characters replaced by `_`. Every upload also gets a SHA-256 hash of the file bytes, which is stored with each indexed row or chunk (`contentHash` in the metadata of `excel_vector_store_gemini`). The upload response now includes `indexingStatus` and `contentHash`:
@@ -267,6 +300,7 @@ For a PDF question, the model returns its answer together with whether the retri
 - Multi-document answers depend on the selector choosing all relevant PDFs (at most 3) and on the model attributing statements to the right document. They use at most 8 excerpts per document, so a broad question can miss content.
 - Document identity is the filename only. Names that differ only in case or punctuation (for example `a b.pdf` and `a_b.pdf`) map to the same document and replace each other, and the same content uploaded under two different names is indexed twice as two documents.
 - The embedding calls run inside the replacement transaction, and a second upload of the same file waits for the first one to finish, so a very large file can hold the upload of the same name for a while. Uploads without a changed hash skip all of this.
+- Observability: requests rejected by question validation (blank or too long) are logged by the validator but not counted in `rag.request.duration`. Embedding time cannot be separated from vector search, and token counts are not recorded by the application. The `/actuator/metrics` endpoint has no authentication.
 - Anything a user types or an answer returns is stored as is, including any sensitive text the user enters. There is no delete or retention policy and no per-user access control: anyone with a conversation id can read it.
 - Messages are stored without a total size limit per conversation.
 

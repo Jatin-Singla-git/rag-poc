@@ -1,5 +1,6 @@
 package com.example.rag_poc.ask;
 
+import com.example.rag_poc.observability.RagObservability;
 import com.example.rag_poc.store.DatasetInfo;
 import com.example.rag_poc.store.DatasetStoreService;
 import org.slf4j.Logger;
@@ -54,10 +55,13 @@ public class ExcelAnalytics {
 
     private final ChatClient chatClient;
     private final DatasetStoreService vectorStoreService;
+    private final RagObservability observability;
 
-    public ExcelAnalytics(ChatClient.Builder chatClientBuilder, DatasetStoreService vectorStoreService) {
+    public ExcelAnalytics(ChatClient.Builder chatClientBuilder, DatasetStoreService vectorStoreService,
+                          RagObservability observability) {
         this.chatClient = chatClientBuilder.build();
         this.vectorStoreService = vectorStoreService;
+        this.observability = observability;
     }
 
     /**
@@ -89,11 +93,12 @@ public class ExcelAnalytics {
                 + PromptSafety.untrusted(String.join(" | ", dataset.columns()))
                 + "\n\n<sample_row>\n" + PromptSafety.untrusted(sample.toString()) + "</sample_row>";
         try {
-            return chatClient.prompt()
-                    .system(PLANNER_SYSTEM_PROMPT)
-                    .user(user)
-                    .call()
-                    .entity(QueryPlan.class);
+            return observability.timed("excel_planner", "dataset=" + dataset.datasetId(),
+                    () -> chatClient.prompt()
+                            .system(PLANNER_SYSTEM_PROMPT)
+                            .user(user)
+                            .call()
+                            .entity(QueryPlan.class));
         } catch (Exception exception) {
             log.warn("Query planning failed, falling back to semantic search: {}", exception.toString());
             return null;
@@ -126,10 +131,17 @@ public class ExcelAnalytics {
         boolean descending = !"ASC".equalsIgnoreCase(plan.sortOrder());
         int limit = plan.limit() == null ? 10 : Math.max(1, Math.min(plan.limit(), 20));
 
+        // Effectively-final copies for the timed lambda (the originals are reassigned above).
+        String sqlMetric = metric;
+        String sqlFilterColumn = filterColumn;
+        String sqlFilterValue = filterValue;
         List<Map<String, Object>> result;
         try {
-            result = vectorStoreService.aggregate(dataset.datasetId(), aggregation, metric,
-                    groupBy, filterColumn, filterValue, descending, limit);
+            result = observability.timed("excel_sql",
+                    "dataset=" + dataset.datasetId() + " aggregation=" + aggregation,
+                    () -> vectorStoreService.aggregate(dataset.datasetId(), aggregation, sqlMetric,
+                            groupBy, sqlFilterColumn, sqlFilterValue, descending, limit),
+                    rows -> "resultRows=" + rows.size());
         } catch (Exception exception) {
             log.warn("SQL aggregation failed, falling back to semantic search: {}", exception.toString());
             return null;

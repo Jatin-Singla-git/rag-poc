@@ -1,5 +1,6 @@
 package com.example.rag_poc.ingest;
 
+import com.example.rag_poc.observability.RagObservability;
 import com.example.rag_poc.store.DatasetInfo;
 import com.example.rag_poc.store.DatasetStoreService;
 import com.example.rag_poc.store.IndexResult;
@@ -31,13 +32,16 @@ public class IngestionService {
     private final ExcelDataService excelDataService;
     private final PdfDocumentService pdfDocumentService;
     private final DatasetStoreService vectorStoreService;
+    private final RagObservability observability;
 
     public IngestionService(ExcelDataService excelDataService,
                             PdfDocumentService pdfDocumentService,
-                            DatasetStoreService vectorStoreService) {
+                            DatasetStoreService vectorStoreService,
+                            RagObservability observability) {
         this.excelDataService = excelDataService;
         this.pdfDocumentService = pdfDocumentService;
         this.vectorStoreService = vectorStoreService;
+        this.observability = observability;
     }
 
     public Map<String, Object> ingest(MultipartFile file) {
@@ -52,17 +56,33 @@ public class IngestionService {
                     "Unsupported file type. Please upload an .xlsx (Excel) or .pdf file.");
         }
 
-        String contentHash = sha256(file);
         String datasetId = DatasetStoreService.toDatasetId(file.getOriginalFilename());
-        if (vectorStoreService.hasContentHash(datasetId, contentHash)) {
-            return unchangedResponse(datasetId, contentHash);
+        RagObservability.Request request = observability.start("Upload",
+                "dataset=" + datasetId + " type=" + (pdf ? "pdf" : "excel") + " sizeBytes=" + file.getSize());
+        try {
+            String contentHash = sha256(file);
+            Map<String, Object> response;
+            if (vectorStoreService.hasContentHash(datasetId, contentHash)) {
+                response = unchangedResponse(datasetId, contentHash);
+            } else {
+                response = pdf ? ingestPdf(file, contentHash) : ingestExcel(file, contentHash);
+            }
+            Object indexed = response.containsKey("indexedChunks")
+                    ? response.get("indexedChunks") : response.get("indexedRows");
+            // The content hash is deliberately not logged.
+            request.finish(String.valueOf(response.get("indexingStatus")), "indexed=" + indexed);
+            return response;
+        } catch (RuntimeException exception) {
+            request.fail(exception);
+            throw exception;
         }
-        return pdf ? ingestPdf(file, contentHash) : ingestExcel(file, contentHash);
     }
 
     private Map<String, Object> ingestExcel(MultipartFile file, String contentHash) {
-        ExcelData data = excelDataService.parse(file);
-        IndexResult result = vectorStoreService.ingest(data, contentHash);
+        ExcelData data = observability.timed("ingest_parse", "type=excel",
+                () -> excelDataService.parse(file), parsed -> "rows=" + parsed.records().size());
+        IndexResult result = observability.timed("ingest_index", "type=excel rows=" + data.records().size()
+                + " (includes embedding)", () -> vectorStoreService.ingest(data, contentHash));
 
         List<Map<String, String>> preview =
                 data.records().subList(0, Math.min(10, data.records().size()));
@@ -87,8 +107,11 @@ public class IngestionService {
     }
 
     private Map<String, Object> ingestPdf(MultipartFile file, String contentHash) {
-        PdfDocumentService.PdfData data = pdfDocumentService.parse(file);
-        IndexResult result = vectorStoreService.ingestPdf(data, contentHash);
+        PdfDocumentService.PdfData data = observability.timed("ingest_parse", "type=pdf",
+                () -> pdfDocumentService.parse(file),
+                parsed -> "pages=" + parsed.totalPages() + " chunks=" + parsed.chunks().size());
+        IndexResult result = observability.timed("ingest_index", "type=pdf chunks=" + data.chunks().size()
+                + " (includes embedding)", () -> vectorStoreService.ingestPdf(data, contentHash));
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("filename", data.filename());

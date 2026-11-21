@@ -1,5 +1,7 @@
 package com.example.rag_poc.ask;
 
+import com.example.rag_poc.observability.RagObservability;
+import com.example.rag_poc.store.ConversationMessage;
 import com.example.rag_poc.store.DatasetInfo;
 import com.example.rag_poc.store.DatasetStoreService;
 import com.example.rag_poc.store.ScopedRows;
@@ -12,6 +14,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.*;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -155,19 +159,44 @@ public class QuestionService {
     private final ExcelAnalytics excelAnalytics;
     private final ConversationService conversationService;
     private final QuestionRewriter questionRewriter;
+    private final RagObservability observability;
 
     public QuestionService(ChatClient.Builder chatClientBuilder,
                            DatasetStoreService vectorStoreService,
                            DatasetSelectionService selectionService,
                            ExcelAnalytics excelAnalytics,
                            ConversationService conversationService,
-                           QuestionRewriter questionRewriter) {
+                           QuestionRewriter questionRewriter,
+                           RagObservability observability) {
         this.chatClient = chatClientBuilder.build();
         this.vectorStoreService = vectorStoreService;
         this.selectionService = selectionService;
         this.excelAnalytics = excelAnalytics;
         this.conversationService = conversationService;
         this.questionRewriter = questionRewriter;
+        this.observability = observability;
+    }
+
+    /**
+     * Entry point of /api/documents/ask. Tracks the request (request id in the log MDC, total time and
+     * outcome) around the unchanged question flow. Only the question length is logged, never its text.
+     */
+    public ExcelAnswer ask(String question, String filename, String conversationId) {
+        boolean conversation = conversationId != null && !conversationId.isBlank();
+        boolean manual = filename != null && !filename.isBlank();
+        RagObservability.Request request = observability.start("Ask",
+                "questionLength=" + question.length() + " conversation=" + conversation
+                        + " selection=" + (manual ? "manual" : "automatic"));
+        try {
+            ExcelAnswer answer = askInConversation(question, filename, conversationId);
+            String outcome = "no_source".equals(answer.mode()) ? "no_source"
+                    : "clarification".equals(answer.mode()) ? "clarification" : "answered";
+            request.finish(outcome, "mode=" + answer.mode());
+            return answer;
+        } catch (RuntimeException exception) {
+            request.fail(exception);
+            throw exception;
+        }
     }
 
     /**
@@ -176,15 +205,24 @@ public class QuestionService {
      * from the documents / Excel analytics. The original question and the answer are then saved.
      * Without a conversationId this behaves exactly as before.
      */
-    public ExcelAnswer ask(String question, String filename, String conversationId) {
+    private ExcelAnswer askInConversation(String question, String filename, String conversationId) {
         if (conversationId == null || conversationId.isBlank()) {
             return ask(question, filename);
         }
         java.util.UUID id = conversationService.require(conversationId);
-        String standalone = questionRewriter.standalone(conversationService.recentHistory(id), question);
+        List<ConversationMessage> history = conversationService.recentHistory(id);
+        String standalone = observability.timed("rewrite", "historyMessages=" + history.size(),
+                () -> questionRewriter.standalone(history, question));
         ExcelAnswer answer = ask(standalone, filename);
         conversationService.append(id, question, answer.answer());
         return answer;
+    }
+
+    /** Runs one retrieval, logging dataset, type, operation, result count and duration. */
+    private <T> T retrieve(DatasetInfo dataset, String operation, Supplier<T> search, Function<T, String> count) {
+        return observability.timed("retrieval",
+                "dataset=" + dataset.datasetId() + " type=" + dataset.type() + " operation=" + operation,
+                search, count);
     }
 
     /**
@@ -193,13 +231,16 @@ public class QuestionService {
      */
     public ExcelAnswer ask(String question, String filename) {
         if (filename != null && !filename.isBlank()) {
-            DatasetInfo dataset = vectorStoreService.findDataset(filename);
+            DatasetInfo dataset = observability.timed("selection", "method=manual",
+                    () -> vectorStoreService.findDataset(filename));
+            log.info("Dataset selection: method=manual dataset={} type={}", dataset.datasetId(), dataset.type());
             return answerFromDataset(question, dataset).withSelection("manual", "Filename was specified.");
         }
 
-        DatasetSelectionService.Selection selection = selectionService.select(question);
-        log.info("Dataset selection: {} {}", selection.status(),
-                selection.datasets().stream().map(DatasetInfo::filename).toList());
+        DatasetSelectionService.Selection selection = observability.timed("selection", "method=automatic",
+                () -> selectionService.select(question));
+        log.info("Dataset selection: method=automatic status={} datasets={}", selection.status(),
+                selection.datasets().stream().map(d -> d.datasetId() + "(" + d.type() + ")").toList());
 
         switch (selection.status()) {
             case NONE:
@@ -268,7 +309,9 @@ public class QuestionService {
 
         try {
             // Exact identifier (e.g. Order ID) lookup comes first: it must not depend on similarity.
-            List<String> exactRows = vectorStoreService.findRowsByIdentifier(dataset.datasetId(), question);
+            List<String> exactRows = retrieve(dataset, "exact_identifier",
+                    () -> vectorStoreService.findRowsByIdentifier(dataset.datasetId(), question),
+                    rows -> "results=" + rows.size());
             if (!exactRows.isEmpty()) {
                 StringBuilder context = new StringBuilder(
                         "Exact matching rows (looked up by identifier, complete rows):\n");
@@ -288,8 +331,10 @@ public class QuestionService {
             }
 
             // Semantic path 1: rows selected by categorical values in the question (e.g. Region = West).
-            ScopedRows scoped =
-                    vectorStoreService.findRowsByCategoricalValues(dataset.datasetId(), question);
+            ScopedRows scoped = retrieve(dataset, "categorical_values",
+                    () -> vectorStoreService.findRowsByCategoricalValues(dataset.datasetId(), question),
+                    found -> found == null ? "results=0"
+                            : "results=" + found.rows().size() + " totalMatches=" + found.totalMatches());
             if (scoped != null) {
                 log.info("Path: value-scoped retrieval ({}; {} matching rows, {} sent)",
                         scoped.scope(), scoped.totalMatches(), scoped.rows().size());
@@ -305,7 +350,9 @@ public class QuestionService {
             }
 
             // Semantic path 2: vector similarity search (fallback).
-            List<String> rows = vectorStoreService.search(dataset.datasetId(), question);
+            List<String> rows = retrieve(dataset, "vector_search",
+                    () -> vectorStoreService.search(dataset.datasetId(), question),
+                    found -> "results=" + found.size());
             log.info("Path: vector similarity search ({} rows)", rows.size());
             if (rows.isEmpty()) {
                 return new ExcelAnswer(
@@ -334,7 +381,9 @@ public class QuestionService {
     /** PDF questions: retrieve the most relevant chunks by similarity and answer from them only. */
     private ExcelAnswer askPdf(String question, DatasetInfo dataset) {
         try {
-            List<Document> chunks = vectorStoreService.searchChunks(dataset.datasetId(), question);
+            List<Document> chunks = retrieve(dataset, "pdf_vector_search",
+                    () -> vectorStoreService.searchChunks(dataset.datasetId(), question),
+                    found -> "retained=" + found.size());
             log.info("Path: PDF chunk retrieval ({} chunks)", chunks.size());
             if (chunks.isEmpty()) {
                 return noPdfSupport(dataset);
@@ -362,12 +411,14 @@ public class QuestionService {
             TreeSet<Integer> pages = new TreeSet<>();
             PdfAnswer structured = null;
             try {
-                structured = chatClient.prompt()
-                        .system(PDF_SYSTEM_PROMPT)
-                        .user("Question: " + question + "\n\n<context>\n"
-                                + PromptSafety.untrusted(context.toString()) + "</context>")
-                        .call()
-                        .entity(PdfAnswer.class);
+                structured = observability.timed("answer_generation",
+                        "structured=true excerpts=" + ordered.size() + " contextChars=" + context.length(),
+                        () -> chatClient.prompt()
+                                .system(PDF_SYSTEM_PROMPT)
+                                .user("Question: " + question + "\n\n<context>\n"
+                                        + PromptSafety.untrusted(context.toString()) + "</context>")
+                                .call()
+                                .entity(PdfAnswer.class));
             } catch (Exception exception) {
                 log.warn("Structured PDF answer failed, using plain answer with all retrieved pages: {}",
                         exception.toString());
@@ -424,7 +475,9 @@ public class QuestionService {
         try {
             List<PdfExcerpt> excerpts = new ArrayList<>();
             for (DatasetInfo dataset : datasets) {
-                List<Document> chunks = vectorStoreService.searchChunks(dataset.datasetId(), question).stream()
+                List<Document> chunks = retrieve(dataset, "pdf_vector_search",
+                        () -> vectorStoreService.searchChunks(dataset.datasetId(), question),
+                        found -> "retained=" + found.size()).stream()
                         .limit(MAX_CHUNKS_PER_DOCUMENT)
                         .sorted(Comparator.comparingInt((Document d) -> pageOf(d))
                                 .thenComparingInt(d -> ((Number) d.getMetadata()
@@ -450,12 +503,15 @@ public class QuestionService {
             Map<String, TreeSet<Integer>> supporting = new LinkedHashMap<>();
             PdfAnswer structured = null;
             try {
-                structured = chatClient.prompt()
-                        .system(PDF_COMPARE_SYSTEM_PROMPT)
-                        .user("Question: " + question + "\n\n<context>\n"
-                                + PromptSafety.untrusted(context.toString()) + "</context>")
-                        .call()
-                        .entity(PdfAnswer.class);
+                structured = observability.timed("answer_generation",
+                        "structured=true documents=" + datasets.size() + " excerpts=" + excerpts.size()
+                                + " contextChars=" + context.length(),
+                        () -> chatClient.prompt()
+                                .system(PDF_COMPARE_SYSTEM_PROMPT)
+                                .user("Question: " + question + "\n\n<context>\n"
+                                        + PromptSafety.untrusted(context.toString()) + "</context>")
+                                .call()
+                                .entity(PdfAnswer.class));
             } catch (Exception exception) {
                 log.warn("Structured multi-PDF answer failed, using plain answer with all retrieved pages: {}",
                         exception.toString());
@@ -529,11 +585,12 @@ public class QuestionService {
     private String generate(String systemPrompt, String question, String context) {
         String user = "Question: " + question + "\n\n<context>\n"
                 + PromptSafety.untrusted(context) + "</context>";
-        String answer = chatClient.prompt()
-                .system(systemPrompt)
-                .user(user)
-                .call()
-                .content();
+        String answer = observability.timed("answer_generation", "structured=false contextChars=" + context.length(),
+                () -> chatClient.prompt()
+                        .system(systemPrompt)
+                        .user(user)
+                        .call()
+                        .content());
         return answer == null ? "" : answer;
     }
 }

@@ -1,5 +1,6 @@
 package com.example.rag_poc.ask;
 
+import com.example.rag_poc.observability.RagObservability;
 import com.example.rag_poc.store.DatasetHit;
 import com.example.rag_poc.store.DatasetInfo;
 import com.example.rag_poc.store.DatasetStoreService;
@@ -73,11 +74,14 @@ public class DatasetSelectionService {
 
     private final ChatClient chatClient;
     private final DatasetStoreService vectorStoreService;
+    private final RagObservability observability;
 
     public DatasetSelectionService(ChatClient.Builder chatClientBuilder,
-                                   DatasetStoreService vectorStoreService) {
+                                   DatasetStoreService vectorStoreService,
+                                   RagObservability observability) {
         this.chatClient = chatClientBuilder.build();
         this.vectorStoreService = vectorStoreService;
+        this.observability = observability;
     }
 
     public Selection select(String question) {
@@ -92,7 +96,11 @@ public class DatasetSelectionService {
         Map<String, Double> bestScore = new HashMap<>();
         Map<String, String> bestText = new HashMap<>();
         try {
-            for (DatasetHit hit : vectorStoreService.searchAllDatasets(question, VECTOR_PROBE)) {
+            List<DatasetHit> hits = observability.timed("selection_vector_probe", "limit=" + VECTOR_PROBE,
+                    () -> vectorStoreService.searchAllDatasets(question, VECTOR_PROBE),
+                    found -> "hits=" + found.size() + " datasets="
+                            + found.stream().map(DatasetHit::datasetId).distinct().count());
+            for (DatasetHit hit : hits) {
                 if (hit.score() > bestScore.getOrDefault(hit.datasetId(), -1.0)) {
                     bestScore.put(hit.datasetId(), hit.score());
                     bestText.put(hit.datasetId(), hit.text());
@@ -119,6 +127,8 @@ public class DatasetSelectionService {
             all.forEach(d -> candidateIds.add(d.datasetId()));
         }
         List<String> candidates = candidateIds.stream().limit(MAX_CANDIDATES).toList();
+        log.info("Selection candidates: available={} candidates={} identifierMatches={}",
+                all.size(), candidates.size(), identifierMatches.size());
         if (candidates.isEmpty()) {
             return none("No uploaded document appears relevant to this question.");
         }
@@ -159,19 +169,24 @@ public class DatasetSelectionService {
         // --- LLM decision (validated)
         SelectionPlan plan = null;
         try {
-            plan = chatClient.prompt()
-                    .system(SELECTOR_SYSTEM_PROMPT)
-                    .user("Question: " + question + "\n\n<candidates>\n"
-                            + PromptSafety.untrusted(profiles.toString()) + "</candidates>")
-                    .call()
-                    .entity(SelectionPlan.class);
+            plan = observability.timed("selection_llm", "candidates=" + candidates.size(),
+                    () -> chatClient.prompt()
+                            .system(SELECTOR_SYSTEM_PROMPT)
+                            .user("Question: " + question + "\n\n<candidates>\n"
+                                    + PromptSafety.untrusted(profiles.toString()) + "</candidates>")
+                            .call()
+                            .entity(SelectionPlan.class));
         } catch (Exception exception) {
-            log.warn("Dataset selection call failed, using similarity fallback: {}", exception.toString());
+            log.warn("Dataset selection call failed ({}), using the explicit-match fallback",
+                    exception.getClass().getSimpleName());
         }
         log.info("Dataset candidates {} -> selector result: {}", candidates, plan);
 
         if (plan == null) {
-            return fallback(question, candidates, infos, identifierMatches);
+            Selection fallbackResult = fallback(question, candidates, infos, identifierMatches);
+            log.warn("Selector unavailable, fallback used: status={} datasets={}", fallbackResult.status(),
+                    fallbackResult.datasets().stream().map(DatasetInfo::datasetId).toList());
+            return fallbackResult;
         }
 
         List<DatasetInfo> chosen = new ArrayList<>();
