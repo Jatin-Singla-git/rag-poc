@@ -133,6 +133,21 @@ Example request:
 
 The application can automatically select the Alegeus SAML PDF if it is available and relevant.
 
+### Re-uploading files (incremental indexing)
+
+A file is identified by its filename: the dataset id is the lowercased filename with unsafe characters replaced by `_`. Every upload also gets a SHA-256 hash of the file bytes, which is stored with each indexed row or chunk (`contentHash` in the metadata of `excel_vector_store_gemini`). The upload response now includes `indexingStatus` and `contentHash`:
+
+| Situation | `indexingStatus` | What happens |
+|---|---|---|
+| New filename | `created` | The file is parsed, embedded and indexed |
+| Same filename, same hash | `unchanged` | Parsing and embedding are skipped and nothing is written. The response reports the stored counts (and the Excel sheet and columns, without a preview) |
+| Same filename, different hash | `updated` | The old rows or chunks of that file are deleted and the new ones inserted in one database transaction |
+
+- Only the rows of that one dataset are removed. Excel data lives only in the same table (the SQL calculations read it from there), so there is nothing else to update.
+- If indexing fails (for example an embedding error), the transaction rolls back and the previous version stays in place.
+- Uploads of the same file at the same time are serialised with a PostgreSQL advisory lock per dataset. The second upload waits, then sees the first one's hash: it reports `unchanged` if the content is identical, or replaces it if not.
+- No schema change is needed. Files indexed before this feature have no hash, so the first re-upload of each is treated as changed and re-indexed once.
+
 ### Multi-document questions
 
 When the automatic selection picks two or more PDFs (up to 3), for example for a comparison question, the application retrieves chunks from each selected PDF and generates one combined answer.
@@ -250,6 +265,8 @@ For a PDF question, the model returns its answer together with whether the retri
 
 - Follow-ups depend on the model rewriting the question correctly. A wrong rewrite can change which file or figure is used, and the rewrite is not shown in the response.
 - Multi-document answers depend on the selector choosing all relevant PDFs (at most 3) and on the model attributing statements to the right document. They use at most 8 excerpts per document, so a broad question can miss content.
+- Document identity is the filename only. Names that differ only in case or punctuation (for example `a b.pdf` and `a_b.pdf`) map to the same document and replace each other, and the same content uploaded under two different names is indexed twice as two documents.
+- The embedding calls run inside the replacement transaction, and a second upload of the same file waits for the first one to finish, so a very large file can hold the upload of the same name for a while. Uploads without a changed hash skip all of this.
 - Anything a user types or an answer returns is stored as is, including any sensitive text the user enters. There is no delete or retention policy and no per-user access control: anyone with a conversation id can read it.
 - Messages are stored without a total size limit per conversation.
 

@@ -74,9 +74,19 @@ public class DatasetStoreService {
 
     // ------------------------------------------------------------------ ingest
 
-    /** Replaces the dataset for this filename with the given rows. Returns the datasetId. */
+    /**
+     * Indexes the rows of one workbook. The dataset is identified by its filename (datasetId) and carries
+     * the SHA-256 of the uploaded file in every row's metadata (contentHash).
+     * <ul>
+     *   <li>no rows for the datasetId: CREATED;</li>
+     *   <li>rows with the same contentHash: UNCHANGED, nothing is embedded or written;</li>
+     *   <li>rows with another (or no) contentHash: the old rows are replaced, UPDATED.</li>
+     * </ul>
+     * Runs in one transaction under a per-dataset advisory lock, so concurrent uploads of the same file
+     * are serialised and a failure leaves the previous version untouched.
+     */
     @Transactional
-    public String ingest(ExcelData data) {
+    public IndexResult ingest(ExcelData data, String contentHash) {
         String datasetId = toDatasetId(data.filename());
         long uploadedAt = System.currentTimeMillis();
 
@@ -98,6 +108,7 @@ public class DatasetStoreService {
             metadata.put("sheetName", data.sheetName());
             metadata.put("rowNumber", rowNumber);
             metadata.put("uploadedAt", uploadedAt);
+            metadata.put("contentHash", contentHash);
             metadata.put("columns", data.headers());
             metadata.put("row", row);
 
@@ -113,15 +124,23 @@ public class DatasetStoreService {
         }
 
         try {
+            lockDataset(datasetId);
+            List<String> existing = existingHashes(datasetId);
+            if (!existing.isEmpty() && contentHash.equals(existing.get(0))) {
+                return new IndexResult(datasetId, IndexResult.Status.UNCHANGED);
+            }
+            // Old rows are removed and the new ones inserted in this one transaction: on any failure
+            // it rolls back and the previous version stays in place.
             jdbcTemplate.update(
                     "DELETE FROM " + table + " WHERE " + JSON + "->>'datasetId' = ?", datasetId);
             vectorStore.add(documents); // embeds locally, then inserts into PostgreSQL
+            return new IndexResult(datasetId,
+                    existing.isEmpty() ? IndexResult.Status.CREATED : IndexResult.Status.UPDATED);
         } catch (Exception exception) {
             log.error("Failed to index dataset '{}' into pgvector", datasetId, exception);
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
                     "Could not store the Excel data in the vector database.");
         }
-        return datasetId;
     }
 
     // ------------------------------------------------- cross-dataset candidates
@@ -170,10 +189,11 @@ public class DatasetStoreService {
     /**
      * Replaces the dataset for this PDF filename with its chunks (same table as Excel rows).
      * Each chunk is one document: content = chunk text, metadata = datasetId, filename, docType=pdf,
-     * page, chunkIndex, totalPages, uploadedAt. Returns the datasetId.
+     * page, chunkIndex, totalPages, uploadedAt, contentHash. Same replace / unchanged rules as
+     * {@link #ingest(ExcelData, String)}.
      */
     @Transactional
-    public String ingestPdf(PdfDocumentService.PdfData data) {
+    public IndexResult ingestPdf(PdfDocumentService.PdfData data, String contentHash) {
         String datasetId = toDatasetId(data.filename());
         long uploadedAt = System.currentTimeMillis();
 
@@ -187,6 +207,7 @@ public class DatasetStoreService {
             metadata.put("chunkIndex", chunk.chunkIndex());
             metadata.put("totalPages", data.totalPages());
             metadata.put("uploadedAt", uploadedAt);
+            metadata.put("contentHash", contentHash);
 
             String id = UUID.nameUUIDFromBytes(
                     (datasetId + "#p" + chunk.page() + "#c" + chunk.chunkIndex())
@@ -195,17 +216,62 @@ public class DatasetStoreService {
         }
 
         try {
+            lockDataset(datasetId);
+            List<String> existing = existingHashes(datasetId);
+            if (!existing.isEmpty() && contentHash.equals(existing.get(0))) {
+                return new IndexResult(datasetId, IndexResult.Status.UNCHANGED);
+            }
             jdbcTemplate.update(
                     "DELETE FROM " + table + " WHERE " + JSON + "->>'datasetId' = ?", datasetId);
             for (int from = 0; from < documents.size(); from += PDF_BATCH_SIZE) {
                 vectorStore.add(documents.subList(from, Math.min(from + PDF_BATCH_SIZE, documents.size())));
             }
+            return new IndexResult(datasetId,
+                    existing.isEmpty() ? IndexResult.Status.CREATED : IndexResult.Status.UPDATED);
         } catch (Exception exception) {
             log.error("Failed to index PDF dataset '{}' into pgvector", datasetId, exception);
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
                     "Could not store the PDF in the vector database.");
         }
-        return datasetId;
+    }
+
+    // ------------------------------------------------- incremental indexing helpers
+
+    /**
+     * Serialises uploads of the same dataset: a transaction-scoped PostgreSQL advisory lock released at
+     * commit/rollback. A second upload of the same file waits here, then sees the first one's committed
+     * content hash. Must be called inside a transaction.
+     */
+    private void lockDataset(String datasetId) {
+        jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM (SELECT pg_advisory_xact_lock(hashtext(?))) l", Integer.class, datasetId);
+    }
+
+    /** Content hash stored with the dataset's chunks: empty list = dataset not indexed, null element = legacy rows. */
+    private List<String> existingHashes(String datasetId) {
+        return jdbcTemplate.queryForList(
+                "SELECT " + JSON + "->>'contentHash' FROM " + table
+                        + " WHERE " + JSON + "->>'datasetId' = ? LIMIT 1",
+                String.class, datasetId);
+    }
+
+    /** Quick check, before any parsing or embedding: is this exact content already indexed for the dataset? */
+    public boolean hasContentHash(String datasetId, String contentHash) {
+        try {
+            List<String> existing = existingHashes(datasetId);
+            return !existing.isEmpty() && contentHash.equals(existing.get(0));
+        } catch (Exception exception) {
+            log.warn("Could not check the stored content hash of '{}', indexing normally: {}",
+                    datasetId, exception.toString());
+            return false;
+        }
+    }
+
+    /** Number of stored rows (Excel) or chunks (PDF) of a dataset. */
+    public int countParts(String datasetId) {
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM " + table + " WHERE " + JSON + "->>'datasetId' = ?", Integer.class, datasetId);
+        return count == null ? 0 : count;
     }
 
     /** Always keep at least this many of the best chunks, however far their scores are from the top. */
@@ -511,7 +577,7 @@ public class DatasetStoreService {
     }
 
     /** Lowercase filename with unsafe characters replaced, e.g. "sales_and_finance_data.xlsx". */
-    static String toDatasetId(String filename) {
+    public static String toDatasetId(String filename) {
         return filename.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9._-]", "_");
     }
 }
