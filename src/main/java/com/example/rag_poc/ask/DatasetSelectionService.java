@@ -61,6 +61,9 @@ public class DatasetSelectionService {
               the excerpt. If a candidate's excerpt is clearly about the same subject area as the
               question (even if it does not state the exact answer), it is a plausible source.
             - Select several files only if the question genuinely needs information from more than one.
+              If the question asks to compare, contrast or combine information across documents, or names
+              several documents, select EVERY candidate that is relevant to any part of it, and set
+              needsClarification to false (all of them are needed, so there is nothing to choose between).
             - needsClarification = true only if two or more candidates are about equally relevant AND the
               choice would materially change the answer; otherwise pick the best one.
             - reason: one short sentence.

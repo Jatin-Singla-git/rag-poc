@@ -133,6 +133,17 @@ Example request:
 
 The application can automatically select the Alegeus SAML PDF if it is available and relevant.
 
+### Multi-document questions
+
+When the automatic selection picks two or more PDFs (up to 3), for example for a comparison question, the application retrieves chunks from each selected PDF and generates one combined answer.
+
+- The answer is organised by document and cites sources as (filename, page N).
+- `sourceFilename` lists the documents that contributed, and `sourcePages` is grouped by document, for example `a.pdf: 4, 5; b.pdf: 2`.
+- If a document has nothing on part of the question, the answer says so. If the documents give conflicting information, both are reported with their source.
+- If none of the excerpts supports an answer, the result is `mode: "no_source"` with no filename or pages, as for a single PDF.
+- If the selected files include an Excel file, each file is still answered separately under "From <file>:" headings, as before.
+- Passing `filename` selects exactly one file, so it never triggers a multi-document answer.
+
 ### Conversation APIs (follow-up questions)
 
 Conversations are stored in PostgreSQL (the same database as the vector store), so they survive an application restart.
@@ -238,6 +249,7 @@ For a PDF question, the model returns its answer together with whether the retri
 ### Remaining limitations
 
 - Follow-ups depend on the model rewriting the question correctly. A wrong rewrite can change which file or figure is used, and the rewrite is not shown in the response.
+- Multi-document answers depend on the selector choosing all relevant PDFs (at most 3) and on the model attributing statements to the right document. They use at most 8 excerpts per document, so a broad question can miss content.
 - Anything a user types or an answer returns is stored as is, including any sensitive text the user enters. There is no delete or retention policy and no per-user access control: anyone with a conversation id can read it.
 - Messages are stored without a total size limit per conversation.
 
