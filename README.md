@@ -133,7 +133,40 @@ Example request:
 
 The application can automatically select the Alegeus SAML PDF if it is available and relevant.
 
-The existing chat API, `POST /api/chat`, is used for general chat and remains separate from document-based question answering.
+### Conversation APIs (follow-up questions)
+
+Conversations are stored in PostgreSQL (the same database as the vector store), so they survive an application restart.
+
+| API | Purpose |
+|---|---|
+| `POST /api/conversations` | Creates a conversation and returns `conversationId` (HTTP 201) |
+| `POST /api/documents/ask` | With an optional `conversationId`, uses the earlier messages to understand a follow-up, then saves the question and the answer |
+| `GET /api/conversations/{conversationId}/messages` | Returns the messages, oldest first |
+| `GET /api/conversations?limit=50` | Lists conversations, most recently updated first (`limit` 1–200, default 50) |
+
+Example flow:
+
+```json
+POST /api/conversations
+→ { "conversationId": "3f0c...", "createdAt": "...", "updatedAt": "..." }
+
+POST /api/documents/ask
+{ "conversationId": "3f0c...", "question": "What was the West region's net revenue?" }
+
+POST /api/documents/ask
+{ "conversationId": "3f0c...", "question": "What about net profit?" }
+```
+
+The `/ask` response keeps its existing fields and adds `conversationId` when one was supplied. Without a `conversationId`, `/ask` behaves exactly as before and nothing is stored.
+
+Tables (created from `src/main/resources/schema.sql` at startup, using `CREATE TABLE IF NOT EXISTS`; the vector-store table is not touched):
+
+- `conversations`: `id` (uuid, primary key), `created_at`, `updated_at`.
+- `conversation_messages`: `id` (uuid, primary key), `conversation_id` (foreign key to `conversations`, deleted with it), `seq` (identity number that gives the order inside a conversation), `role` (`user` or `assistant`), `content`, `created_at`. An index on `(conversation_id, seq)` supports loading history.
+
+Settings (in `application.properties`): `app.chat.history-messages` (how many recent messages are used, default 6) and `app.chat.history-max-chars` (characters kept per message, default 800).
+
+The existing chat API, `POST /api/chat`, is used for general chat and remains separate from document-based question answering. It does not use conversation memory.
 
 ## 7. POC Validation
 
@@ -193,7 +226,20 @@ For a PDF question, the model returns its answer together with whether the retri
 - If the model-based document selector fails, a document is chosen only when a cell value exactly matches an identifier in the question (for example an order ID) or the question contains the file's name.
 - Otherwise the normal `no_source` result is returned. A document is never chosen from the similarity score alone.
 
+### Conversation history
+
+- A `conversationId` must be a valid UUID of an existing conversation. An invalid value returns HTTP 400 and an unknown one returns HTTP 404, each with a `message`. A conversation only ever loads its own messages.
+- The history is used only to rewrite a follow-up into a standalone question (one extra model call, only when the conversation already has messages). That question then goes through the normal file selection, Excel analytics and PDF retrieval, so answers come from the documents, not from earlier answers. Earlier assistant replies are never treated as evidence.
+- History text goes through the same delimiter neutralising as document text, and the rewrite prompt tells the model to ignore instructions inside it.
+- Only the most recent messages (default 6, each cut to 800 characters) are used.
+- The original question and the answer are saved only after a successful answer, together in one transaction. Question validation (blank, 2,000 characters) runs before anything is loaded or saved.
+- Message text is stored in PostgreSQL as plain text. It is not written to the application log, which records only ids, counts and lengths.
+
 ### Remaining limitations
+
+- Follow-ups depend on the model rewriting the question correctly. A wrong rewrite can change which file or figure is used, and the rewrite is not shown in the response.
+- Anything a user types or an answer returns is stored as is, including any sensitive text the user enters. There is no delete or retention policy and no per-user access control: anyone with a conversation id can read it.
+- Messages are stored without a total size limit per conversation.
 
 - Grounding relies on prompt instructions. The code does not check the answer text against the retrieved content, so an unsupported or inaccurate answer is still possible.
 - The model decides what counts as supporting. It can list a wrong excerpt, omit a useful one, or declare a valid answer unsupported, which then returns `no_source`.

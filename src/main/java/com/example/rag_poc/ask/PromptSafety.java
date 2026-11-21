@@ -5,7 +5,7 @@ import java.util.regex.Pattern;
 final class PromptSafety {
 
     private static final Pattern PROMPT_TAG =
-            Pattern.compile("<(\\s*/?\\s*(?:context|candidates|sample_row)\\b)", Pattern.CASE_INSENSITIVE);
+            Pattern.compile("<(\\s*/?\\s*(?:context|candidates|sample_row|history)\\b)", Pattern.CASE_INSENSITIVE);
 
     private PromptSafety() {
     }

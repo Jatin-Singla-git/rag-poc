@@ -121,15 +121,38 @@ public class QuestionService {
     private final DatasetStoreService vectorStoreService;
     private final DatasetSelectionService selectionService;
     private final ExcelAnalytics excelAnalytics;
+    private final ConversationService conversationService;
+    private final QuestionRewriter questionRewriter;
 
     public QuestionService(ChatClient.Builder chatClientBuilder,
                            DatasetStoreService vectorStoreService,
                            DatasetSelectionService selectionService,
-                           ExcelAnalytics excelAnalytics) {
+                           ExcelAnalytics excelAnalytics,
+                           ConversationService conversationService,
+                           QuestionRewriter questionRewriter) {
         this.chatClient = chatClientBuilder.build();
         this.vectorStoreService = vectorStoreService;
         this.selectionService = selectionService;
         this.excelAnalytics = excelAnalytics;
+        this.conversationService = conversationService;
+        this.questionRewriter = questionRewriter;
+    }
+
+    /**
+     * Same as {@link #ask(String, String)}, optionally inside a conversation. With a conversationId the
+     * recent history is used only to turn a follow-up into a standalone question; the answer still comes
+     * from the documents / Excel analytics. The original question and the answer are then saved.
+     * Without a conversationId this behaves exactly as before.
+     */
+    public ExcelAnswer ask(String question, String filename, String conversationId) {
+        if (conversationId == null || conversationId.isBlank()) {
+            return ask(question, filename);
+        }
+        java.util.UUID id = conversationService.require(conversationId);
+        String standalone = questionRewriter.standalone(conversationService.recentHistory(id), question);
+        ExcelAnswer answer = ask(standalone, filename);
+        conversationService.append(id, question, answer.answer());
+        return answer;
     }
 
     /**

@@ -32,6 +32,8 @@ public class DatasetSelectionService {
     private static final int MAX_SELECTED = 3;
     private static final int VECTOR_PROBE = 30;
     private static final int SNIPPET_LENGTH = 200;
+    /** PDF chunks are up to 1000 characters; show the whole best chunk so the matching sentence is visible. */
+    private static final int PDF_SNIPPET_LENGTH = 1000;
     private static final int MAX_COLUMNS_SHOWN = 60;
 
     public enum Status { SELECTED, NONE, CLARIFY }
@@ -52,6 +54,12 @@ public class DatasetSelectionService {
               candidate is relevant to the question.
             - Judge by what each file actually contains (its columns, excerpt and filename), not by its
               type. A spreadsheet can answer descriptive questions and a document can contain numbers.
+            - top_excerpt is only the single most similar passage of a file, not its whole content. A
+              topic missing from the excerpt is NOT proof that the file lacks it. Reject a candidate only
+              when the available evidence (excerpt, columns, filename, size) indicates it is about
+              something unrelated to the question; do not require every relevant detail to appear in
+              the excerpt. If a candidate's excerpt is clearly about the same subject area as the
+              question (even if it does not state the exact answer), it is a plausible source.
             - Select several files only if the question genuinely needs information from more than one.
             - needsClarification = true only if two or more candidates are about equally relevant AND the
               choice would materially change the answer; otherwise pick the best one.
@@ -135,8 +143,10 @@ public class DatasetSelectionService {
                     .append("\n");
             String text = bestText.get(id);
             if (text != null) {
-                profiles.append("  top_excerpt: ").append(text.replaceAll("\\s+", " "), 0,
-                        Math.min(SNIPPET_LENGTH, text.replaceAll("\\s+", " ").length())).append("\n");
+                String flat = text.replaceAll("\\s+", " ");
+                int snippetLength = "pdf".equals(info.type()) ? PDF_SNIPPET_LENGTH : SNIPPET_LENGTH;
+                profiles.append("  top_excerpt: ").append(flat, 0, Math.min(snippetLength, flat.length()))
+                        .append("\n");
             }
             if (identifierMatches.contains(id)) {
                 profiles.append("  exact_identifier_match: true\n");

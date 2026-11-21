@@ -35,11 +35,16 @@ public class DocumentController {
         String question = QuestionValidator.validate(request == null ? null : request.get("question"));
 
         // Optional "filename" targets a specific upload; if omitted the relevant file(s) are selected automatically.
+        // Optional "conversationId" keeps follow-up questions in the same stored conversation.
+        String conversationId = request.get("conversationId");
         QuestionService.ExcelAnswer result =
-                questionService.ask(question, request.get("filename"));
+                questionService.ask(question, request.get("filename"), conversationId);
 
         Map<String, String> response = new LinkedHashMap<>();
         response.put("question", question);
+        if (conversationId != null && !conversationId.isBlank()) {
+            response.put("conversationId", conversationId.trim());
+        }
         response.put("answer", result.answer());
         response.put("sourceFilename", result.filename());
         if (result.selection() != null) {
